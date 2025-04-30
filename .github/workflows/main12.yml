@@ -1,4 +1,4 @@
-name: push to ecr
+name: push to eks helm
 on:
   push:
     branches: [ "main" ]
@@ -40,3 +40,7 @@ jobs:
 
     - name: Update kube config
       run: aws eks update-kubeconfig --name yocluster
+
+    - name: Deploy nodejs helm chart to EKS
+      run: |
+        helm install nodeapp ./node-app
