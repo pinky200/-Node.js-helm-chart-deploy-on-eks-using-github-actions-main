@@ -1,0 +1,85 @@
+name: Deploy to EKS with Helm
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'node-app/**'  # Only trigger when Helm chart changes
+      - 'src/**'       # Or your application code directory
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # Required for OIDC
+      contents: read
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Configure AWS Credentials (OIDC)
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
+        aws-region: ${{ secrets.AWS_REGION }}
+        role-session-name: github-${{ github.run_id }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        push: true
+        tags: |
+          ${{ steps.login-ecr.outputs.registry }}/yoecr:${{ github.sha }}
+          ${{ steps.login-ecr.outputs.registry }}/yoecr:latest
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Install kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.27'  # Match your EKS version
+
+    - name: Install Helm
+      uses: azure/setup-helm@v3
+      with:
+        version: 'v3.12.0'
+
+    - name: Configure kubeconfig
+      run: |
+        aws eks update-kubeconfig \
+          --name yocluster \
+          --region ${{ secrets.AWS_REGION }}
+
+    - name: Deploy Helm Chart (Uninstall + Install)
+      run: |
+        # Clean up existing release if it exists
+        helm uninstall nodeapp --namespace default --wait || true
+        
+        # Install new release
+        helm install nodeapp ./node-app \
+          --namespace default \
+          --create-namespace \
+          --set image.repository=${{ steps.login-ecr.outputs.registry }}/yoecr \
+          --set image.tag=${{ github.sha }} \
+          --atomic \
+          --wait \
+          --timeout 5m
+
+    - name: Verify deployment
+      run: |
+        helm status nodeapp --namespace default
+        kubectl get pods -n default -l app.kubernetes.io/instance=nodeapp
+        kubectl get svc -n default -l app.kubernetes.io/instance=nodeapp
+
+    - name: Cleanup on PR close
+      if: github.event_name == 'pull_request' && github.event.action == 'closed'
+      run: |
+        helm uninstall nodeapp --namespace default --wait || true
